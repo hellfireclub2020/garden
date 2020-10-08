@@ -11,7 +11,7 @@ import { partition, uniq } from "lodash"
 
 import { KubernetesModule, configureKubernetesModule, KubernetesService } from "./config"
 import { KubernetesPluginContext } from "../config"
-import { KubernetesServerResource } from "../types"
+import { BaseResource, KubernetesResource, KubernetesServerResource } from "../types"
 import { ServiceStatus } from "../../../types/service"
 import { compareDeployedResources, waitForResources } from "../status/status"
 import { KubeApi } from "../api"
@@ -31,6 +31,10 @@ import { runKubernetesTask } from "./run"
 import { getTestResult } from "../test-results"
 import { getTaskResult } from "../task-results"
 import { getModuleNamespace } from "../namespace"
+import { ContainerHotReloadSpec } from "../../container/config"
+import { HotReloadableResource, hotReloadK8s } from "../hot-reload/hot-reload"
+import { findServiceResource, getServiceResourceSpec } from "../util"
+import { getHotReloadSpec, configureHotReload, getHotReloadContainerName } from "../hot-reload/helpers"
 
 export const kubernetesHandlers: Partial<ModuleAndRuntimeActionHandlers<KubernetesModule>> = {
   build,
@@ -40,6 +44,7 @@ export const kubernetesHandlers: Partial<ModuleAndRuntimeActionHandlers<Kubernet
   getPortForward: getPortForwardHandler,
   getServiceLogs,
   getServiceStatus: getKubernetesServiceStatus,
+  hotReloadService: hotReloadK8s,
   getTaskResult,
   getTestResult,
   runTask: runKubernetesTask,
@@ -92,7 +97,7 @@ export async function getKubernetesServiceStatus({
 export async function deployKubernetesService(
   params: DeployServiceParams<KubernetesModule>
 ): Promise<KubernetesServiceStatus> {
-  const { ctx, module, service, log } = params
+  const { ctx, module, service, log, hotReload } = params
 
   const k8sCtx = <KubernetesPluginContext>ctx
   const api = await KubeApi.factory(log, ctx, k8sCtx.provider)
@@ -106,36 +111,52 @@ export async function deployKubernetesService(
 
   const manifests = await getManifests({ api, log, module, defaultNamespace: namespace })
 
-  /**
-   * We separate out manifests for namespace resources, since we don't want to apply a prune selector
-   * when applying them.
-   */
-  const [namespaceManifests, otherManifests] = partition(manifests, (m) => m.kind === "Namespace")
+  // We separate out manifests for namespace resources, since we don't want to apply a prune selector
+  // when applying them.
+  const partitioned = partition(manifests, (m) => m.kind === "Namespace")
+  const namespaceManifests = partitioned[0]
+
+  // We modify these for hot reloading
+  let otherManifests = partitioned[1]
 
   if (namespaceManifests.length > 0) {
     // Don't prune namespaces
     await apply({ log, ctx, provider: k8sCtx.provider, manifests: namespaceManifests })
-    await waitForResources({
-      namespace,
-      ctx,
-      provider: k8sCtx.provider,
-      serviceName: service.name,
-      resources: namespaceManifests,
-      log,
-    })
   }
+
   const pruneSelector = getSelector(service)
   if (otherManifests.length > 0) {
-    // Prune everything else
+    let hotReloadSpec: ContainerHotReloadSpec | null = null
+    let hotReloadTarget: HotReloadableResource | null = null
+
+    if (hotReload) {
+      hotReloadTarget = await findServiceResource({
+        ctx,
+        log,
+        module,
+        baseModule: undefined,
+        manifests,
+        resourceSpec: service.spec.serviceResource,
+      })
+      hotReloadSpec = getHotReloadSpec(service)
+    }
+
+    if (hotReload && hotReloadSpec && hotReloadTarget) {
+      const resourceSpec = getServiceResourceSpec(module, undefined)
+      configureHotReload({
+        target: hotReloadTarget,
+        hotReloadSpec,
+        hotReloadArgs: resourceSpec.hotReloadArgs,
+        containerName: getHotReloadContainerName(module),
+      })
+
+      // Replace the original hot reload resource with the modified spec
+      otherManifests = otherManifests
+        .filter((m) => !(m.kind === hotReloadTarget!.kind && hotReloadTarget?.metadata.name === m.metadata.name))
+        .concat(<KubernetesResource<BaseResource>>hotReloadTarget)
+    }
+
     await apply({ log, ctx, provider: k8sCtx.provider, manifests: otherManifests, pruneSelector })
-    await waitForResources({
-      namespace,
-      ctx,
-      provider: k8sCtx.provider,
-      serviceName: service.name,
-      resources: otherManifests,
-      log,
-    })
   }
 
   await waitForResources({
@@ -143,7 +164,7 @@ export async function deployKubernetesService(
     ctx,
     provider: k8sCtx.provider,
     serviceName: service.name,
-    resources: manifests,
+    resources: [...namespaceManifests, ...otherManifests],
     log,
   })
 

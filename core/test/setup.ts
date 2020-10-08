@@ -28,7 +28,7 @@ before(async () => {
 
 after(() => {
   // tslint:disable-next-line: no-console
-  console.log(getDefaultProfiler().report())
+  // console.log(getDefaultProfiler().report())
 })
 
 beforeEach(() => {})
