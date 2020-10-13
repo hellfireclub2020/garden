@@ -13,19 +13,19 @@ This project contains a single service called `node-service`. When running, the 
 In the `garden.yml` file of the `node-service` module we first enable hot-reloading and specify the target directory it should hot-reload changed sourcefiles into:
 
 ```yaml
-
----
+# ...
 hotReload:
   sync:
     - target: /app/
+# ...
 ```
 
 We also tell the module which command should be run if hot-reloading is enabled to start the service:
 
 ```yaml
-
----
+# ...
 hotReloadArgs: [npm, run, dev]
+# ...
 ```
 
 ## Usage

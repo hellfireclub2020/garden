@@ -115,19 +115,26 @@ export async function deployKubernetesService(
   // when applying them.
   const partitioned = partition(manifests, (m) => m.kind === "Namespace")
   const namespaceManifests = partitioned[0]
-
   // We modify these for hot reloading
   let otherManifests = partitioned[1]
 
   if (namespaceManifests.length > 0) {
     // Don't prune namespaces
     await apply({ log, ctx, provider: k8sCtx.provider, manifests: namespaceManifests })
+    await waitForResources({
+      namespace,
+      ctx,
+      provider: k8sCtx.provider,
+      serviceName: service.name,
+      resources: namespaceManifests,
+      log,
+    })
   }
 
   const pruneSelector = getSelector(service)
   if (otherManifests.length > 0) {
-    let hotReloadSpec: ContainerHotReloadSpec | null = null
-    let hotReloadTarget: HotReloadableResource | null = null
+    let hotReloadSpec: ContainerHotReloadSpec | undefined
+    let hotReloadTarget: HotReloadableResource | undefined
 
     if (hotReload) {
       hotReloadTarget = await findServiceResource({
@@ -157,16 +164,15 @@ export async function deployKubernetesService(
     }
 
     await apply({ log, ctx, provider: k8sCtx.provider, manifests: otherManifests, pruneSelector })
+    await waitForResources({
+      namespace,
+      ctx,
+      provider: k8sCtx.provider,
+      serviceName: service.name,
+      resources: otherManifests,
+      log,
+    })
   }
-
-  await waitForResources({
-    namespace,
-    ctx,
-    provider: k8sCtx.provider,
-    serviceName: service.name,
-    resources: [...namespaceManifests, ...otherManifests],
-    log,
-  })
 
   const status = await getKubernetesServiceStatus(params)
 
